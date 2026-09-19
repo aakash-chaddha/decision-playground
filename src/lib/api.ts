@@ -20,11 +20,17 @@ export interface DecisionField {
   interval_p10_p90?: unknown[]
 }
 
-export interface DecisionResponse {
+// One result per entry of "contexts", in the same order.
+export interface DecisionItem {
   decision: Record<string, unknown>
   fields: Record<string, DecisionField>
+  usage: { context_tokens: number; scored_rows: number }
+}
+
+export interface DecisionResponse {
+  results: DecisionItem[]
   usage: { prompt_tokens: number; cached_tokens: number; context_tokens: number; scored_rows: number }
-  timings: { prefill_ms: number; scoring_ms: number; total_ms: number; rounds: number }
+  timings: { prefill_ms: number; scoring_ms: number; total_ms: number; rounds: number; per_decision_ms: number }
 }
 
 export interface ApiRequest {

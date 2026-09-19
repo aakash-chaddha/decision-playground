@@ -51,6 +51,7 @@ export interface GameConfig {
 }
 
 export interface AgentTiming {
+  batched: boolean // decided in one request together with the other agent
   roundTrip: number
   server: number
   prefill: number
@@ -77,8 +78,9 @@ export class GameRunner {
   private runCalls = 0
   rate: number | null = null
   timings: Partial<Record<Actor, AgentTiming>> = {}
-  requests: Partial<Record<Actor, ApiRequest>> = {}
-  responses: Partial<Record<Actor, DecisionResponse>> = {}
+  contexts: Partial<Record<Actor, string>> = {}
+  requests: ApiRequest[] = []
+  responses: DecisionResponse[] = []
   lastControls: Partial<Record<Actor, Record<string, unknown>>> = {}
   events: string[] = []
   private generation = 0
@@ -113,8 +115,9 @@ export class GameRunner {
     this.calls = this.accepted = 0
     this.latency = this.rate = null
     this.timings = {}
-    this.requests = {}
-    this.responses = {}
+    this.contexts = {}
+    this.requests = []
+    this.responses = []
     this.lastControls = {}
     this.events = []
     this.log('Reset · seed 7')
@@ -157,14 +160,18 @@ export class GameRunner {
     this.cycle(this.generation, true)
   }
 
-  private requestFor(snapshot: unknown, dt: number, actor: Actor): ApiRequest {
+  private observe(snapshot: unknown, dt: number, actor: Actor): { instructions: string; context: string } {
     const text =
       buildLayaContext(snapshot, dt, actor, { instructions: this.cfg.instructions, previous: null }) +
       (this.cfg.aim ? '\nRelative enemy aim deviation: ' + JSON.stringify(aimDeviation(snapshot, actor)) : '')
     const { static_context, context } = mojoContext(text, true)
+    return { instructions: static_context, context }
+  }
+
+  private request(instructions: string, contexts: string[]): ApiRequest {
     return {
       url: `${this.cfg.server}/v1/decision`,
-      body: { model: this.cfg.model, instructions: static_context, context, schema: GAME_SCHEMA, cache_prompt: true },
+      body: { model: this.cfg.model, instructions, contexts, schema: GAME_SCHEMA, cache_prompt: true },
     }
   }
 
@@ -180,26 +187,36 @@ export class GameRunner {
     const controls: Partial<Record<Actor, ReturnType<typeof validateControls>>> = {}
     let delay = 0
     try {
-      for (const actor of actors) {
+      const seen = actors.map((a) => this.observe(snapshot, dt, a))
+      actors.forEach((a, k) => (this.contexts[a] = seen[k].context))
+      // Agents with the same fixed prompt decide in one request, one context each.
+      const groups = seen.every((o) => o.instructions === seen[0].instructions) ? [actors] : actors.map((a) => [a])
+      this.requests = []
+      this.responses = []
+      for (const group of groups) {
         if (token !== this.generation) return
-        this.status = `Requesting ${actor === 'player' ? 'cyan' : 'red'} controls…`
-        const req = this.requestFor(snapshot, dt, actor)
-        this.requests[actor] = req
+        this.status = `Requesting ${group.map((a) => (a === 'player' ? 'cyan' : 'red')).join(' + ')} controls…`
+        const req = this.request(seen[actors.indexOf(group[0])].instructions, group.map((a) => this.contexts[a]!))
+        this.requests.push(req)
         this.calls++
         const t0 = performance.now()
         const data = await decide(req)
         if (token !== this.generation) return
-        this.responses[actor] = data
-        this.timings[actor] = {
-          roundTrip: performance.now() - t0,
-          server: data.timings.total_ms,
-          prefill: data.timings.prefill_ms,
-          scoring: data.timings.scoring_ms,
-          cached: data.usage.cached_tokens > 0,
-          sharedTokens: data.usage.prompt_tokens - data.usage.context_tokens,
-          contextTokens: data.usage.context_tokens,
-        }
-        controls[actor] = validateControls({ ...data.decision, turn_angle: Number(data.decision.turn_angle) })
+        this.responses.push(data)
+        group.forEach((actor, k) => {
+          const item = data.results[k]
+          this.timings[actor] = {
+            batched: group.length > 1,
+            roundTrip: performance.now() - t0,
+            server: data.timings.total_ms,
+            prefill: data.timings.prefill_ms,
+            scoring: data.timings.scoring_ms,
+            cached: data.usage.cached_tokens > 0,
+            sharedTokens: data.usage.prompt_tokens - data.usage.context_tokens,
+            contextTokens: item.usage.context_tokens,
+          }
+          controls[actor] = validateControls({ ...item.decision, turn_angle: Number(item.decision.turn_angle) })
+        })
       }
       if (token !== this.generation) return
       this.latency = performance.now() - started

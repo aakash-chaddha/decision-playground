@@ -67,6 +67,28 @@ aim:33,right`,
     context: JSON.stringify({message: 'I was charged twice and need this fixed today.', customerPlan: 'Pro', accountAgeDays: 420}, null, 2),
   },
   {
+    id: 'routing-bulk', name: 'Support ticket routing · 8 tickets in one request',
+    blurb: 'The same three questions for eight tickets: one /v1/decision call against eight chat completions.',
+    instructions: 'Answer each question about this support request from its state.',
+    schema: {
+      category: e(['billing', 'technical', 'cancellation', 'other'], 'What type of support request is this?'),
+      urgent: b('Does this need urgent handling?'),
+      priority: e(['low', 'medium', 'high', 'critical'], 'Rate support priority.'),
+    },
+    context: [
+      { message: 'I was charged twice and need this fixed today.', customerPlan: 'Pro', accountAgeDays: 420 },
+      { message: 'The dashboard has been down for our whole team since this morning.', customerPlan: 'Enterprise', accountAgeDays: 1210 },
+      { message: 'How do I export my data to CSV?', customerPlan: 'Free', accountAgeDays: 12 },
+      { message: 'Please cancel my subscription at the end of this month.', customerPlan: 'Pro', accountAgeDays: 95 },
+      { message: 'Love the new charts, any plans for dark mode?', customerPlan: 'Pro', accountAgeDays: 300 },
+      { message: 'API calls return 500 errors and our checkout is failing.', customerPlan: 'Enterprise', accountAgeDays: 640 },
+      { message: 'My invoice shows the wrong company address.', customerPlan: 'Pro', accountAgeDays: 210 },
+      { message: 'Cancel now or I will dispute the charge with my bank.', customerPlan: 'Free', accountAgeDays: 3 },
+    ]
+      .map((state) => JSON.stringify(state, null, 2))
+      .join('\n---\n'),
+  },
+  {
     id: 'ticket', name: 'Support ticket triage · 12 fields',
     blurb: 'Route and label an inbound customer email.',
     instructions: `You triage customer support email for a SaaS product (plans: free, pro, enterprise).

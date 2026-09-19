@@ -145,7 +145,7 @@ export function Game() {
   const locked = r.running || r.stepping || r.busy
 
   const contextRows = (actor: Actor) => {
-    const text = (r.requests[actor]?.body.context as string) || ''
+    const text = r.contexts[actor] || ''
     if (!text) return null
     return (
       <table className="cols">
@@ -265,6 +265,12 @@ export function Game() {
             <dl>
               <dt>{duel ? 'Pair round trip' : 'Round trip'}</dt>
               <dd>{ms(r.latency, 1)}</dd>
+              {duel && r.timings.player && (
+                <>
+                  <dt>Duel requests</dt>
+                  <dd>{r.timings.player.batched ? 'one request, both agents' : 'one per agent'}</dd>
+                </>
+              )}
               {actors.map((a) => (
                 <div className="tgroup" key={a} style={{ borderColor: COLORS[a] }}>
                   <dt>{a === 'player' ? 'Cyan' : 'Red'} server / prefill / scoring</dt>
@@ -308,25 +314,30 @@ export function Game() {
             </div>
             <div className="detail-body">
               {panel === 'request' &&
-                (actors.some((a) => r.requests[a]) ? (
-                  actors.map((a) =>
-                    r.requests[a] ? (
+                (r.requests.length ? (
+                  <>
+                    {actors.map((a) => (
                       <div key={a} className="req-block">
                         <h4 style={{ color: COLORS[a] }}>{a === 'player' ? 'Cyan' : 'Red'} · changing context, sent every decision</h4>
                         {contextRows(a)}
-                        <details>
-                          <summary>Full request body · POST {r.requests[a]!.url}</summary>
-                          <pre>{JSON.stringify(r.requests[a]!.body, null, 2)}</pre>
-                        </details>
                       </div>
-                    ) : null,
-                  )
+                    ))}
+                    {r.requests.map((req, k) => (
+                      <details key={k}>
+                        <summary>
+                          Request body{r.requests.length > 1 ? ` ${k + 1}` : ''} · {(req.body.contexts as string[]).length} context
+                          {(req.body.contexts as string[]).length > 1 ? 's' : ''} · POST {req.url}
+                        </summary>
+                        <pre>{JSON.stringify(req.body, null, 2)}</pre>
+                      </details>
+                    ))}
+                  </>
                 ) : (
                   <p className="empty">Start or Step to send the first request.</p>
                 ))}
               {panel === 'response' &&
-                (actors.some((a) => r.responses[a]) ? (
-                  actors.map((a) => r.responses[a] && <pre key={a}>{JSON.stringify(r.responses[a], null, 2)}</pre>)
+                (r.responses.length ? (
+                  r.responses.map((res, k) => <pre key={k}>{JSON.stringify(res, null, 2)}</pre>)
                 ) : (
                   <p className="empty">No response yet.</p>
                 ))}

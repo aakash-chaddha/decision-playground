@@ -19,6 +19,10 @@ npm run dev
 Set the llama-server URL in the header (stored in the browser). To bake a default into a build, set
 `VITE_DEFAULT_SERVER` (for example in `.env.local`); otherwise it defaults to `http://localhost:8080`.
 
+`/v1/decision` takes `contexts`, a list of 1-256 context strings, and returns `results` in the same order; all
+contexts share the schema, the instructions and the cached prompt prefix. In the playground, separate several
+contexts with a line of `---`; the game sends both duel agents in one request.
+
 The server needs `--decision-seqs N` (or `decision-seqs = N` in a router preset). In router mode the model
 list and "loaded" markers come from `/v1/models`, and requests pick the model with the `model` field.
 

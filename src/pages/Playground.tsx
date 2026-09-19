@@ -50,6 +50,9 @@ interface RunState {
 }
 const idleRun: RunState = { status: 'idle', running: false, roundTrip: null, server: null, error: '' }
 const n = (v: number | null | undefined, d = 0) => (v == null || Number.isNaN(v) ? '–' : v.toFixed(d))
+// Several contexts go in one box, separated by a line of three or more dashes.
+const splitContexts = (text: string) => text.split(/\n-{3,}\n/).map((c) => c.trim()).filter(Boolean)
+type Answer = Record<string, unknown> | null
 
 export function Playground() {
   const { server } = useSettings()
@@ -67,7 +70,7 @@ export function Playground() {
     tokens: 0,
     timings: null,
   })
-  const [llmJson, setLlmJson] = useState<Record<string, unknown> | null>(null)
+  const [llmJsons, setLlmJsons] = useState<Answer[] | null>(null)
   const [sent, setSent] = useState<{ dec: ApiRequest | null; llm: ApiRequest | null }>({ dec: null, llm: null })
   const [view, setView] = useState<{ dec: 'out' | 'req'; llm: 'out' | 'req' }>({ dec: 'out', llm: 'out' })
   const [busy, setBusy] = useState(false)
@@ -103,11 +106,14 @@ export function Playground() {
     }
   }, [inputs.schema])
 
+  const contexts = useMemo(() => splitContexts(inputs.context), [inputs.context])
+
   const decisionRequest = (): ApiRequest => ({
     url: `${server}/v1/decision`,
-    body: { model, instructions: inputs.instructions, context: inputs.context, schema: schemaObj.value, mode: opts.mode, cache_prompt: opts.cache },
+    body: { model, instructions: inputs.instructions, contexts, schema: schemaObj.value, mode: opts.mode, cache_prompt: opts.cache },
   })
-  const llmRequest = (): ApiRequest => {
+  // The LLM has no bulk form: one chat completion per context, run one after another.
+  const llmRequest = (context: string): ApiRequest => {
     const jsonSchema = toJsonSchema(schemaObj.value!)
     const instr = inputs.instructions.trim()
     const system =
@@ -121,7 +127,7 @@ export function Playground() {
       temperature: opts.temperature,
       messages: [
         { role: 'system', content: system },
-        { role: 'user', content: inputs.context },
+        { role: 'user', content: context },
       ],
       chat_template_kwargs: { enable_thinking: opts.thinking },
       stream_options: { include_usage: true },
@@ -144,12 +150,13 @@ export function Playground() {
       const wall = decTimer.current!.stop()
       decTimer.current!.showServer(data.timings.total_ms)
       setDecResult(data)
+      const many = data.results.length > 1 ? `${data.results.length} decisions · ` : ''
       setDec({
         running: false,
         roundTrip: wall,
         server: data.timings.total_ms,
         error: '',
-        status: `done · round trip ${Math.round(wall)} ms${cold ? ' incl. load' : ''}${data.usage.cached_tokens ? '' : ' · cold cache'}`,
+        status: `done · ${many}round trip ${Math.round(wall)} ms${cold ? ' incl. load' : ''}${data.usage.cached_tokens ? '' : ' · cold cache'}`,
       })
     } catch (e) {
       decTimer.current?.stop()
@@ -159,48 +166,69 @@ export function Playground() {
   }
 
   async function runLlm(signal: AbortSignal, cold = isCold()) {
-    const req = llmRequest()
-    setSent((s) => ({ ...s, llm: req }))
-    setLlmJson(null)
+    const reqs = contexts.map(llmRequest)
+    setSent((s) => ({ ...s, llm: reqs[0] }))
+    setLlmJsons(null)
     setLlmText({ content: '', reasoning: '' })
     setLlmStats({ ttft: null, tokens: 0, timings: null })
     setLlm({ ...idleRun, running: true, status: cold ? 'loading model…' : 'waiting for first token…' })
     llmTimer.current?.start()
     let ttft: number | null = null
     let chunks = 0
+    const answers: Answer[] = []
+    const sum = { prompt_ms: 0, predicted_ms: 0, predicted_n: 0, prompt_n: 0 }
+    let timed = true
     try {
-      const result = await streamChat(
-        req,
-        (piece, reason) => {
-          if (ttft == null) {
-            ttft = llmTimer.current!.elapsed()
-            setLlm((s) => ({ ...s, status: 'streaming…' }))
-          }
-          chunks++
-          setLlmText((t) => ({ content: t.content + piece, reasoning: t.reasoning + reason }))
-          setLlmStats((s) => ({ ...s, ttft, tokens: chunks }))
-          requestAnimationFrame(() => llmOut.current && (llmOut.current.scrollTop = llmOut.current.scrollHeight))
-        },
-        signal,
-      )
-      const wall = llmTimer.current!.stop()
-      const t = result.timings
-      const serverMs = t?.prompt_ms != null && t?.predicted_ms != null ? t.prompt_ms + t.predicted_ms : null
-      if (serverMs != null) llmTimer.current!.showServer(serverMs)
-      let parsed: Record<string, unknown> | null = null
-      try {
-        parsed = JSON.parse(result.content.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''))
-      } catch {
-        parsed = null
+      for (const [k, req] of reqs.entries()) {
+        const label = reqs.length > 1 ? `context ${k + 1}/${reqs.length} · ` : ''
+        if (k > 0) {
+          setLlmText({ content: '', reasoning: '' })
+          setLlm((s) => ({ ...s, status: `${label}waiting…` }))
+        }
+        const result = await streamChat(
+          req,
+          (piece, reason) => {
+            if (ttft == null) ttft = llmTimer.current!.elapsed()
+            chunks++
+            setLlm((s) => ({ ...s, status: `${label}streaming…` }))
+            setLlmText((t) => ({ content: t.content + piece, reasoning: t.reasoning + reason }))
+            setLlmStats((s) => ({ ...s, ttft, tokens: chunks }))
+            requestAnimationFrame(() => llmOut.current && (llmOut.current.scrollTop = llmOut.current.scrollHeight))
+          },
+          signal,
+        )
+        const t = result.timings
+        if (t?.prompt_ms != null && t?.predicted_ms != null) {
+          sum.prompt_ms += t.prompt_ms
+          sum.predicted_ms += t.predicted_ms
+          sum.predicted_n += t.predicted_n ?? 0
+          sum.prompt_n += t.prompt_n ?? 0
+        } else timed = false
+        let parsed: Answer = null
+        try {
+          parsed = JSON.parse(result.content.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''))
+        } catch {
+          parsed = null
+        }
+        answers.push(parsed)
+        setLlmJsons([...answers])
       }
-      setLlmJson(parsed)
-      setLlmStats({ ttft, tokens: t?.predicted_n ?? result.usage?.completion_tokens ?? chunks, timings: t, promptTokens: t?.prompt_n ?? result.usage?.prompt_tokens })
+      const wall = llmTimer.current!.stop()
+      const serverMs = timed ? sum.prompt_ms + sum.predicted_ms : null
+      if (serverMs != null) llmTimer.current!.showServer(serverMs)
+      setLlmStats({
+        ttft,
+        tokens: timed ? sum.predicted_n : chunks,
+        timings: timed ? { ...sum, predicted_per_second: sum.predicted_n / (sum.predicted_ms / 1000) } : null,
+        promptTokens: timed ? sum.prompt_n : undefined,
+      })
+      const bad = answers.filter((a) => !a).length
       setLlm({
         running: false,
         roundTrip: wall,
         server: serverMs,
         error: '',
-        status: `done · round trip ${Math.round(wall)} ms${cold ? ' incl. load' : ''}${parsed ? '' : ' · not valid JSON'}`,
+        status: `done · ${reqs.length > 1 ? `${reqs.length} completions · ` : ''}round trip ${Math.round(wall)} ms${cold ? ' incl. load' : ''}${bad ? ` · ${bad} not valid JSON` : ''}`,
       })
     } catch (e) {
       llmTimer.current?.stop()
@@ -215,7 +243,7 @@ export function Playground() {
     abort.current = controller
     setBusy(true)
     if (which === 'both') {
-      setLlmJson(null)
+      setLlmJsons(null)
       setLlm(idleRun)
     }
     try {
@@ -246,12 +274,13 @@ export function Playground() {
     if (!req) {
       if (!schemaObj.value) return `Cannot build the request: ${schemaObj.error}`
       try {
-        req = card === 'dec' ? decisionRequest() : llmRequest()
+        req = card === 'dec' ? decisionRequest() : llmRequest(contexts[0] || '')
       } catch (e) {
         return `Cannot build the request: ${(e as Error).message}`
       }
       note = 'preview from the current inputs, not sent yet'
     }
+    if (card === 'llm' && contexts.length > 1) note += ` · first of ${contexts.length} requests, one per context`
     return (
       <>
         <span className="meta">{`// ${note}\nPOST ${req.url}\nContent-Type: application/json\n\n`}</span>
@@ -260,41 +289,85 @@ export function Playground() {
     )
   }
 
-  const decision = decResult?.decision || null
-  const names = decision ? Object.keys(decision) : llmJson ? Object.keys(llmJson) : []
+  const items = decResult?.results || null
+  const count = Math.max(items?.length || 0, llmJsons?.length || 0)
+  const names = items ? Object.keys(items[0].decision) : llmJsons?.find(Boolean) ? Object.keys(llmJsons.find(Boolean)!) : []
   let same = 0
   let compared = 0
-  const cells = names.map((name) => {
-    const d = decision?.[name]
-    const l = llmJson?.[name]
-    const both = !!decision && !!llmJson
-    const ok = both && JSON.stringify(d) === JSON.stringify(l)
-    if (both) {
-      compared++
-      if (ok) same++
-    }
-    const prob = decResult?.fields[name]?.probability
-    return (
-      <div key={name} className={`fc${both ? (ok ? ' same' : ' diff') : ''}`}>
-        <div className="n" title={name}>
-          {name}
-        </div>
-        {decision && (
-          <div className="v d">
-            <i className="dot d" />
-            <span>{d === undefined ? '—' : JSON.stringify(d)}</span>
-            {prob != null && <span className="p">{(prob * 100).toFixed(prob > 0.995 ? 0 : 1)}%</span>}
+  const verdict = (k: number, name: string) => {
+    const d = items?.[k]?.decision[name]
+    const l = llmJsons?.[k]
+    if (!items?.[k] || !l) return ''
+    const ok = JSON.stringify(d) === JSON.stringify(l[name])
+    compared++
+    if (ok) same++
+    return ok ? ' same' : ' diff'
+  }
+  const show = (v: unknown) => (v === undefined ? '—' : JSON.stringify(v))
+  const pct = (p?: number) => (p == null ? '' : `${(p * 100).toFixed(p > 0.995 ? 0 : 1)}%`)
+
+  let fieldView: React.ReactNode = <div className="empty">Run a request to see each field here.</div>
+  if (count === 1) {
+    fieldView = (
+      <div className="grid">
+        {names.map((name) => (
+          <div key={name} className={`fc${verdict(0, name)}`}>
+            <div className="n" title={name}>
+              {name}
+            </div>
+            {items && (
+              <div className="v d">
+                <i className="dot d" />
+                <span>{show(items[0].decision[name])}</span>
+                <span className="p">{pct(items[0].fields[name]?.probability)}</span>
+              </div>
+            )}
+            {llmJsons?.[0] && (
+              <div className="v l">
+                <i className="dot l" />
+                <span>{show(llmJsons[0][name])}</span>
+              </div>
+            )}
           </div>
-        )}
-        {llmJson && (
-          <div className="v l">
-            <i className="dot l" />
-            <span>{l === undefined ? '—' : JSON.stringify(l)}</span>
-          </div>
-        )}
+        ))}
       </div>
     )
-  })
+  } else if (count > 1) {
+    fieldView = (
+      <div className="multi">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              {names.map((name) => (
+                <th key={name} title={name}>
+                  {name}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {Array.from({ length: count }, (_, k) => (
+              <tr key={k}>
+                <th title={contexts[k]}>{k + 1}</th>
+                {names.map((name) => {
+                  const cls = verdict(k, name)
+                  const d = items?.[k]?.decision[name]
+                  const l = llmJsons?.[k]?.[name]
+                  return (
+                    <td key={name} className={cls}>
+                      {items?.[k] ? <span className="d">{show(d)}</span> : null}
+                      {llmJsons?.[k] && (!items?.[k] || cls === ' diff') ? <span className="l">{show(l)}</span> : null}
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
   const summaryText = compared
     ? `${same}/${compared} agree` +
       (dec.server && llm.server ? ` · server: decision ${Math.round(dec.server)} ms vs LLM ${Math.round(llm.server)} ms (${(llm.server / dec.server).toFixed(1)}×)` : '') +
@@ -343,7 +416,7 @@ export function Playground() {
           <SchemaEditor value={inputs.schema} onChange={(schema) => update({ schema })} />
           <div className="box c">
             <div className="lbl">
-              Context <small>user message</small>
+              Context <small>{contexts.length > 1 ? `${contexts.length} contexts · one decision each` : 'user message · separate several with a --- line'}</small>
             </div>
             <textarea spellCheck={false} value={inputs.context} onChange={(e) => update({ context: e.target.value })} aria-label="Context" />
           </div>
@@ -407,12 +480,15 @@ export function Playground() {
                 <span><b>{n(t?.prefill_ms, 1)}</b>prefill ms</span>
                 <span><b>{n(t?.scoring_ms, 1)}</b>scoring ms</span>
                 <span><b>{n(dec.roundTrip)}</b>round trip ms</span>
+                {(items?.length || 0) > 1 && <span><b>{n(t?.per_decision_ms, 1)}</b>ms / decision</span>}
                 <span><b>{n(u?.prompt_tokens)}</b>prompt tok</span>
                 <span><b>{n(u?.cached_tokens)}</b>cached</span>
                 <span><b>{n(u?.scored_rows)}</b>rows</span>
               </div>
               {view.dec === 'out' ? (
-                <pre aria-live="polite">{dec.error ? `Error: ${dec.error}` : decision ? JSON.stringify(decision, null, 2) : ''}</pre>
+                <pre aria-live="polite">
+                  {dec.error ? `Error: ${dec.error}` : items ? JSON.stringify(items.length === 1 ? items[0].decision : items.map((r) => r.decision), null, 2) : ''}
+                </pre>
               ) : (
                 <pre className="req">{requestView('dec')}</pre>
               )}
@@ -453,7 +529,7 @@ export function Playground() {
               <span className="key"><i className="dot l" />LLM</span>
               <span className="sum">{summaryText}</span>
             </div>
-            <div className="grid">{cells.length ? cells : <div className="empty">Run a request to see each field here.</div>}</div>
+            {fieldView}
             {decResult && (
               <details>
                 <summary>Raw decision response</summary>
