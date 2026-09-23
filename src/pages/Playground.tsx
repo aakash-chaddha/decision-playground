@@ -7,6 +7,8 @@ import { SchemaEditor } from '../components/SchemaEditor'
 import { Stopwatch, type StopwatchHandle } from '../components/Stopwatch'
 import { useSplit } from '../components/Gutter'
 import { ModelSelect, useModelChoice, useModels } from '../components/ModelSelect'
+import { Attachments, useModalities } from '../components/Attachments'
+import { contentParts, decisionContexts, shrinkPayload, type Attachment } from '../lib/multimodal'
 
 const STORE = 'decision-playground.request'
 
@@ -59,6 +61,8 @@ export function Playground() {
   const { models, error: modelError, refresh } = useModels()
   const [model, setModel] = useModelChoice('playground', models)
   const [inputs, setInputs] = useState<Inputs>(loadInputs)
+  const [files, setFiles] = useState<Attachment[]>([])
+  const modalities = useModalities(server, model)
   const [opts, setOpts] = useState<Options>({ mode: 'auto', cache: true, maxTokens: 1024, temperature: 0, grammar: true, thinking: false })
 
   const [dec, setDec] = useState<RunState>(idleRun)
@@ -93,7 +97,12 @@ export function Playground() {
   }, [inputs])
 
   // Any change to what would be sent turns the Request tabs back into previews.
-  useEffect(() => setSent({ dec: null, llm: null }), [inputs, opts, model, server])
+  useEffect(() => setSent({ dec: null, llm: null }), [inputs, opts, model, server, files])
+
+  // Files were validated against the model that was selected at the time; a new one may not take them.
+  useEffect(() => {
+    setFiles([])
+  }, [server, model])
 
   const update = (patch: Partial<Inputs>) => setInputs((cur) => ({ ...cur, ...patch, preset: 'custom' }))
   const blurb = PRESETS.find((p) => p.id === inputs.preset)?.blurb || 'Your own request.'
@@ -107,10 +116,11 @@ export function Playground() {
   }, [inputs.schema])
 
   const contexts = useMemo(() => splitContexts(inputs.context), [inputs.context])
+  const decisionCtx = useMemo(() => decisionContexts(contexts, files), [contexts, files])
 
   const decisionRequest = (): ApiRequest => ({
     url: `${server}/v1/decision`,
-    body: { model, instructions: inputs.instructions, contexts, schema: schemaObj.value, mode: opts.mode, cache_prompt: opts.cache },
+    body: { model, instructions: inputs.instructions, contexts: decisionCtx.contexts, schema: schemaObj.value, mode: opts.mode, cache_prompt: opts.cache },
   })
   // The LLM has no bulk form: one chat completion per context, run one after another.
   const llmRequest = (context: string): ApiRequest => {
@@ -127,7 +137,7 @@ export function Playground() {
       temperature: opts.temperature,
       messages: [
         { role: 'system', content: system },
-        { role: 'user', content: context },
+        { role: 'user', content: contentParts(context, files) },
       ],
       chat_template_kwargs: { enable_thinking: opts.thinking },
       stream_options: { include_usage: true },
@@ -177,6 +187,9 @@ export function Playground() {
     let chunks = 0
     const answers: Answer[] = []
     const sum = { prompt_ms: 0, predicted_ms: 0, predicted_n: 0, prompt_n: 0 }
+    // timings.prompt_n counts only the tokens this batch actually evaluated, so a warm prefix cache
+    // makes it 1. The prompt size the request paid for is usage.prompt_tokens.
+    let promptTokens = 0
     let timed = true
     try {
       for (const [k, req] of reqs.entries()) {
@@ -204,6 +217,7 @@ export function Playground() {
           sum.predicted_n += t.predicted_n ?? 0
           sum.prompt_n += t.prompt_n ?? 0
         } else timed = false
+        promptTokens += result.usage?.prompt_tokens ?? 0
         let parsed: Answer = null
         try {
           parsed = JSON.parse(result.content.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''))
@@ -220,7 +234,7 @@ export function Playground() {
         ttft,
         tokens: timed ? sum.predicted_n : chunks,
         timings: timed ? { ...sum, predicted_per_second: sum.predicted_n / (sum.predicted_ms / 1000) } : null,
-        promptTokens: timed ? sum.prompt_n : undefined,
+        promptTokens: promptTokens || (timed ? sum.prompt_n : undefined),
       })
       const bad = answers.filter((a) => !a).length
       setLlm({
@@ -281,10 +295,11 @@ export function Playground() {
       note = 'preview from the current inputs, not sent yet'
     }
     if (card === 'llm' && contexts.length > 1) note += ` · first of ${contexts.length} requests, one per context`
+    if (card === 'dec' && decisionCtx.note) note += ` · ${decisionCtx.note}`
     return (
       <>
         <span className="meta">{`// ${note}\nPOST ${req.url}\nContent-Type: application/json\n\n`}</span>
-        {JSON.stringify(req.body, null, 2)}
+        {JSON.stringify(shrinkPayload(req.body), null, 2)}
       </>
     )
   }
@@ -419,6 +434,7 @@ export function Playground() {
               Context <small>{contexts.length > 1 ? `${contexts.length} contexts · one decision each` : 'user message · separate several with a --- line'}</small>
             </div>
             <textarea spellCheck={false} value={inputs.context} onChange={(e) => update({ context: e.target.value })} aria-label="Context" />
+            <Attachments modalities={modalities} value={files} onChange={setFiles} />
           </div>
           <div className="opts">
             <label className="ctl">
@@ -451,7 +467,7 @@ export function Playground() {
             </label>
           </div>
           <div className="runs">
-            <button type="button" className="primary" disabled={busy || !model} onClick={() => run('dec')}>
+            <button type="button" className="primary" disabled={busy || !model} title={decisionCtx.note || undefined} onClick={() => run('dec')}>
               Decision
             </button>
             <button type="button" className="llmbtn" disabled={busy || !model} onClick={() => run('llm')}>
@@ -483,6 +499,7 @@ export function Playground() {
                 {(items?.length || 0) > 1 && <span><b>{n(t?.per_decision_ms, 1)}</b>ms / decision</span>}
                 <span><b>{n(u?.prompt_tokens)}</b>prompt tok</span>
                 <span><b>{n(u?.cached_tokens)}</b>cached</span>
+                {u?.media_tokens ? <span><b>{n(u.media_tokens)}</b>media tok</span> : null}
                 <span><b>{n(u?.scored_rows)}</b>rows</span>
               </div>
               {view.dec === 'out' ? (

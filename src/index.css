@@ -88,6 +88,13 @@ textarea { flex: 1; min-height: 60px; width: 100%; resize: none; font-size: 13.5
 .opts { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
 .runs { display: flex; gap: 6px; }
 .inputs .runs button { flex: 1; white-space: nowrap; }
+.files { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 6px; }
+.files .link { flex: none; }
+.files .hint { font-size: 12.5px; color: var(--muted); }
+.files .chip { max-width: 280px; }
+.files .chip small { color: var(--muted); font-weight: 400; }
+.files .chip.bad { outline: 1px solid var(--bad); }
+.files .chip.bad small { color: var(--bad); }
 
 .results { display: grid; grid-template-rows: var(--top, 280px) 10px minmax(0, 1fr); min-height: 0; }
 .runners { display: grid; grid-template-columns: minmax(0, var(--dec, 50%)) 10px minmax(0, 1fr); min-height: 0; }

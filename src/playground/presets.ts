@@ -89,6 +89,62 @@ aim:33,right`,
       .join('\n---\n'),
   },
   {
+    id: 'screenshot-routing', name: 'Screenshot routing · 5 fields',
+    blurb: 'Attach a screenshot under Context: both runs route the same screen and message.',
+    instructions: `You route an inbound customer message and, when one is attached, the screenshot that came with it.
+The screenshot is the strongest evidence: decide from the screen it shows, its error text and its button labels before the wording of the message.
+category: the product area of the screen. billing for payment, invoice, refund and checkout screens; technical for error pages, crashes and blank screens; account for login, 2FA and profile screens; cancellation when the customer wants to stop the plan; other when nothing matches.
+escalate_to: billing when the screen or the message is about money, engineering for error pages and blank screens, trust_safety for fraud or abuse, none when the queue can handle it.
+priority: critical for a failed payment or data loss, high when the customer is blocked, normal for questions, low for feedback.
+error_code_visible: true only when the screenshot shows an error code or a stack trace.
+sla_hours: critical = 1, high = 4, normal = 24, low = 72.`,
+    schema: {
+      category: e(['billing', 'technical', 'account', 'cancellation', 'other'], 'Product area shown in the screenshot, or implied by the message when no screenshot is attached.'),
+      escalate_to: e(['none', 'billing', 'engineering', 'trust_safety'], 'Team per the rules.'),
+      priority: e(['low', 'normal', 'high', 'critical'], 'Priority per the rules.'),
+      error_code_visible: b('true only when the screenshot shows an error code or stack trace.'),
+      sla_hours: e(['1', '4', '24', '72'], 'Deadline that matches the priority.'),
+    },
+    context: JSON.stringify({
+      message: 'Tried again this morning and it still does the same thing. Our launch is on Friday, can someone look at this today?',
+      screenshotAttached: true,
+      customerPlan: 'Business',
+      accountAgeDays: 260,
+      previousTickets: 3,
+    }, null, 2),
+  },
+  {
+    id: 'image-classification', name: 'Image classification · 8 fields',
+    blurb: 'Attach any image: both runs classify the same pixels — /v1/decision in one pass, the LLM token by token.',
+    instructions: `You classify the image that comes with the request. The pixels are the evidence: the subject, the setting, the framing, and any text or UI in the frame.
+kind: the main subject. animal for a living creature, person when a human is the subject, object for a product, vehicle or tool, document for a page of text, screenshot for a capture of a device or application UI, scene for a landscape or room with no clear subject.
+scene: the setting behind the subject. screen for a screenshot, studio for a product shot on a plain backdrop, indoor, outdoor, unknown otherwise.
+is_screenshot: true when the image is a capture of a device or application UI.
+has_visible_text: true when legible text is anywhere in the frame, including button labels and error messages.
+text_language: the language of that text; none when there is no text.
+people_count: the number of people whose face or body is visible, capped at 5; 0 when nobody is shown.
+image_quality: low for blur, compression artefacts or bad lighting, medium for a usable but imperfect shot, high for a clean shot.
+is_photo: true for a camera photo, false for an illustration, render or screenshot.`,
+    schema: {
+      kind: e(['animal', 'person', 'object', 'document', 'screenshot', 'scene'], 'The main subject of the image.'),
+      scene: e(['screen', 'studio', 'indoor', 'outdoor', 'unknown'], 'The setting behind the subject.'),
+      is_screenshot: b('true when the image captures a device or application UI.'),
+      has_visible_text: b('true when legible text is anywhere in the frame.'),
+      text_language: e(['none', 'en', 'de', 'fr', 'es', 'other'], 'Language of the visible text; none when there is no text.'),
+      people_count: int(0, 5, 'Visible people, capped at 5.'),
+      image_quality: e(['low', 'medium', 'high'], 'Sharpness and lighting of the shot.'),
+      is_photo: b('true for a camera photo, false for an illustration, render or screenshot.'),
+    },
+    context: JSON.stringify({
+      asset: 'upload-4821.jpg',
+      caption: '',
+      camera: 'iPhone 15 Pro',
+      dimensions: '2310x3072',
+      orientation: 'portrait',
+      source: 'support widget',
+    }, null, 2),
+  },
+  {
     id: 'ticket', name: 'Support ticket triage · 12 fields',
     blurb: 'Route and label an inbound customer email.',
     instructions: `You triage customer support email for a SaaS product (plans: free, pro, enterprise).
